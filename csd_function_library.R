@@ -3,7 +3,7 @@
 # ║                                                                            ║
 # ║  Source this file to get reusable functions for data work.                 ║
 # ║                                                                            ║
-# ║  Environment variables required (see Renviron.example):                   ║
+# ║  Environment variables required (see Renviron.example):                    ║
 # ║    OCLC_CLIENT_ID_WCMetaAPI                                                ║
 # ║    OCLC_CLIENT_SECRET_WCMetaAPI                                            ║
 # ║    OCLC_CLIENT_ID_WCSearchAPI                                              ║
