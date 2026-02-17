@@ -6,9 +6,9 @@ A centralized collection of R functions designed to streamline CSD data workflow
 
 ## 🛠 Environment & Dependencies
 
-| Requirement | Version |
-| :--- | :--- |
-| **R Version** | `4.5.2` |
+
+
+**R Version** `4.5.2`
 
 ### Required Packages
 This library relies on the following R package:
