@@ -2,11 +2,11 @@
 Consists of frequently used functions in CSD data workflows, analysis or dashboard development.
 
 Dependencies:
-googlesheets4_1.1.2
-stringr_1.6.0
-purrr_1.2.1 
-dplyr_1.1.4 
-httr2_1.2.2 
+1) googlesheets4_1.1.2
+2) stringr_1.6.0
+3) purrr_1.2.1 
+4) dplyr_1.1.4 
+5) httr2_1.2.2 
 
 R version: 4.5.2
 
