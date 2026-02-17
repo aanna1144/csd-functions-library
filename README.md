@@ -38,7 +38,7 @@ This library relies on the following R packages for API interaction and data man
 
 ---
 
-## ⚙️ Setup & Configuration
+## ⚙️ Configuration
 
 ### Environment Variables
 This library requires an `.Renviron` file to store sensitive API credentials and other details. 
