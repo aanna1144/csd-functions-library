@@ -21,7 +21,7 @@ This library relies on the following R package:
 
 ---
 
-## 🚀 Key Functions
+## 🚀 Functions
 
 ### Authentication
 * **`get_oclc_token()`**: Fetches a new OCLC access token for specified APIs (WorldCat Metadata/Search). |
