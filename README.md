@@ -1,6 +1,6 @@
 # CSD Analytics Functions Library 📊
 
-A centralized collection of R functions designed to streamline CSD data workflows, bibliometric analysis, and dashboard development.
+A centralized collection of R functions designed to streamline CSD data workflows, data analysis, and dashboard development.
 
 ---
 
@@ -11,7 +11,7 @@ A centralized collection of R functions designed to streamline CSD data workflow
 | **R Version** | `4.5.2` |
 
 ### Required Packages
-This library relies on the following R packages for API interaction and data manipulation:
+This library relies on the following R package:
 
 * `googlesheets4` (v1.1.2)
 * `stringr` (v1.6.0)
@@ -44,3 +44,7 @@ This library relies on the following R packages for API interaction and data man
 This library requires an `.Renviron` file to store sensitive API credentials and other details. 
 > 💡 **Note:** See `.Renviron.example` in this repository for the required naming conventions and structure.
 
+---
+
+## 🔗 Integrated Repositories
+The following repos actively utilize this library:
