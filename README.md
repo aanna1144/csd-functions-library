@@ -1,27 +1,46 @@
-# CSD-Analytics-Functions-Library
-Consists of frequently used functions in CSD data workflows, analysis or dashboard development.
+# CSD Analytics Functions Library 📊
 
-Dependencies:
-1) googlesheets4_1.1.2
-2) stringr_1.6.0
-3) purrr_1.2.1 
-4) dplyr_1.1.4 
-5) httr2_1.2.2 
+A centralized collection of R functions designed to streamline CSD data workflows, bibliometric analysis, and dashboard development.
 
-R version: 4.5.2
+---
 
-Functions:
-1) get_oclc_token: Fetches a new OCLC access token for the specified API (currently supports WorldCatMetaDataAPI & WorldCatSearchAPI) and stores it.
-        &
-   ensure_valid_token: Checks if the current token for the specified API is still valid; refreshes if not.
-   
-2) enrich_lc_classification: Uses the WorldCat Metadata API classification-bibs endpoint to get the most popular LC call number for each OCLC number in a data frame.
-3) enrich_uc_overlap:  Uses the WorldCat Search API bibs-holdings endpoint filtered by UC institution symbols. For each OCLC number, returns a pipe-separated list of UC institution names that hold the item.
-4) enrich_total_holdings: Uses the WorldCat Search API bibs-holdings endpoint to get the total worldwide holding count for each OCLC number.
-5) enrich_selectors: Assigns a Selector and Role to each row based on its LC call number, using a lookup table stored in a Google Sheets maintained by CSD Selectors & Director.    
-6) enrich_vernacular_title: Extracts a clean vernacular (880) title from a MARC Local Param column that contains $$6 245 linked fields. Strips the $$6 prefix and removes $$b (subtitle) and $$c (statement of responsibility) subfield markers.
+## 🛠 Environment & Dependencies
 
-This script requires a Renviron file; example for which is included in the repository.
+| Requirement | Version |
+| :--- | :--- |
+| **R Version** | `4.5.2` |
 
-The following repositories make use of this functions library:
-1) 
+### Required Packages
+This library relies on the following R packages for API interaction and data manipulation:
+
+* `googlesheets4` (v1.1.2)
+* `stringr` (v1.6.0)
+* `purrr` (v1.2.1)
+* `dplyr` (v1.1.4)
+* `httr2` (v1.2.2)
+
+---
+
+## 🚀 Key Functions
+
+### Authentication
+| Function | Description |
+| :--- | :--- |
+| `get_oclc_token()` | Fetches a new OCLC access token for specified APIs (WorldCat Metadata/Search). |
+| `ensure_valid_token()` | Checks token expiration and auto-refreshes if necessary. |
+
+### Enrichment & Data Processing
+* **`enrich_lc_classification()`**: Hits the WorldCat Metadata API `classification-bibs` endpoint to retrieve the most frequent LC call number for a given OCLC list.
+* **`enrich_uc_overlap()`**: Uses the WorldCat Search API to identify UC-wide holdings. Returns a pipe-separated list of UC institutions holding the item.
+* **`enrich_total_holdings()`**: Retrieves the worldwide holding count for OCLC numbers via the `bibs-holdings` endpoint.
+* **`enrich_selectors()`**: Joins LC call numbers against a master Google Sheet lookup table to assign Selectors and Roles.
+* **`enrich_vernacular_title()`**: Cleans MARC Local Param columns (field 880). It strips `$$6` prefixes and removes `$$b` (subtitle) or `$$c` markers to return a readable vernacular title.
+
+---
+
+## ⚙️ Setup & Configuration
+
+### Environment Variables
+This library requires an `.Renviron` file to store sensitive API credentials and other details. 
+> 💡 **Note:** See `.Renviron.example` in this repository for the required naming conventions and structure.
+
