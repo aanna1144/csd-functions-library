@@ -1,0 +1,8 @@
+OCLC_CLIENT_ID_WCMetaAPI= "xxxxxxxxxxxxxxxxxxxxxxx"
+OCLC_CLIENT_SECRET_WCMetaAPI= "xxxxxxxxxxxxxxxxxxxxxxx"
+OCLC_CLIENT_ID_WCSearchAPI= "xxxxxxxxxxxxxxxxxxxxxxx"                                            
+OCLC_CLIENT_SECRET_WCSearchAPI= "xxxxxxxxxxxxxxxxxxxxxxx"  
+GOOGLE_AUTH_EMAIL= "your_email@ucsb.edu"
+SELECTOR_LOOKUP_SHEET_ID= "xxxxxxxxxxxxxxxxxxxxxxx"
+
+
