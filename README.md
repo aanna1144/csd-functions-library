@@ -11,7 +11,7 @@ A centralized collection of R functions designed to streamline CSD data workflow
 **R Version** `4.5.2`
 
 ### Required Packages
-This library relies on the following R package:
+This library relies on the following R packages:
 
 * `googlesheets4` (v1.1.2)
 * `stringr` (v1.6.0)
