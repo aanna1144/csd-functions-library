@@ -6,18 +6,13 @@ A centralized collection of R functions designed to streamline CSD data workflow
 
 ## 🛠 Environment & Dependencies
 
+![Static Badge](https://img.shields.io/badge/R%20Version-%E2%89%A54.5.2-blue.svg)
 
-
-**R Version** `4.5.2`
-
-### Required Packages
-This library relies on the following R packages:
-
-* `googlesheets4` (v1.1.2)
-* `stringr` (v1.6.0)
-* `purrr` (v1.2.1)
-* `dplyr` (v1.1.4)
-* `httr2` (v1.2.2)
+![Static Badge](https://img.shields.io/badge/googlesheets4-%E2%89%A51.1.2-blue.svg)
+![Static Badge](https://img.shields.io/badge/stringr-%E2%89%A51.6.0-blue.svg)
+![Static Badge](https://img.shields.io/badge/purrr-%E2%89%A51.2.1-blue.svg)
+![Static Badge](https://img.shields.io/badge/dplyr-%E2%89%A51.1.4-blue.svg)
+![Static Badge](https://img.shields.io/badge/httr2-%E2%89%A51.2.2-blue.svg)
 
 ---
 
@@ -44,5 +39,7 @@ This library requires an `.Renviron` file to store sensitive API credentials and
 
 ---
 
-## 🔗 Integrated Repositories
-The following repos actively utilize this library:
+## 🔄 Dashboards & Apps Using This Kit
+
+- **ILL Borrowing Data Dashboard**: Interlibrary loan analytics
+- **Selector Assignment Tool**: Batch call number to selector matching
