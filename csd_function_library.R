@@ -299,13 +299,13 @@ enrich_uc_overlap <- function(data,
       brief_recs <- data_resp$briefRecords
 
       if (is.null(brief_recs) || length(brief_recs) == 0) {
-        return(NA_character_)
+        NA_character_
       }
 
       brief_holdings <- brief_recs[[1]]$institutionHolding$briefHoldings
 
       if (is.null(brief_holdings) || length(brief_holdings) == 0) {
-        return(NA_character_)
+        NA_character_
       }
 
       # Extract institution names
@@ -411,7 +411,7 @@ enrich_total_holdings <- function(data,
       brief_recs <- data_resp$briefRecords
 
       if (is.null(brief_recs) || length(brief_recs) == 0) {
-        return(NA_integer_)
+        NA_integer_
       }
 
       count <- brief_recs[[1]]$institutionHolding$totalHoldingCount
