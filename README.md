@@ -48,7 +48,7 @@ library(purrr)
 library(stringr)          #only needed if using enrich_vernacular_title()
 library(googlesheets4)    #only needed if using enrich_selectors()
 
-source("csd_shinyui_kit.R")
+source("csd_function_library.R")
 ```
 
 ---
