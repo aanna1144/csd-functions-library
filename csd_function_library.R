@@ -455,7 +455,8 @@ enrich_total_holdings <- function(data,
 # ║  using a lookup table stored in a Google Sheet.                            ║
 # ║                                                                            ║
 # ║  The lookup is fetched from Google Sheets using GOOGLE_AUTH_EMAIL and      ║
-# ║  SELECTOR_LOOKUP_SHEET_ID from .Renviron unless passed explicitly.         ║
+# ║  SELECTOR_LOOKUP_SHEET_ID from .Renviron OR using a service account in     ║
+# ║  which case it is directly passed as lookup_df                             ║
 # ║  If the lookup table is already loaded (e.g. in a Shiny app), pass it      ║
 # ║  directly via lookup_df to skip the Google Sheets fetch.                   ║
 # ║                                                                            ║
