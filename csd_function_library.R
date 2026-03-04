@@ -224,7 +224,7 @@ enrich_lc_classification <- function(data,
 # ║    ZAS, ZAP, ZAPSP, HH0, ZASSP                                             ║
 # ║  Set rlf_only = FALSE (default) to check all UC symbols:                   ║
 # ║    ZAS, UCMER, BOL, UCILW, CUY, CUV, CUI, CLU, MERUC, ZAP, CRU,            ║
-# ║    CUS, CUN, CUT, CUZ, UCDLL, ZAPSP, HH0, ZASSP                            ║
+# ║    CUS, CUN, CUZ, UCDLL, ZAPSP, HH0, ZASSP                            ║
 # ║                                                                            ║
 # ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
 # ║  preserves the original row count exactly.                                 ║
@@ -256,7 +256,7 @@ enrich_uc_overlap <- function(data,
   # Full UC symbol set
   all_uc_symbols <- c(
     "ZAS", "UCMER", "BOL", "UCILW", "CUY", "CUV", "CUI", "CLU",
-    "MERUC", "ZAP", "CRU", "CUS", "CUN", "CUT", "CUZ", "UCDLL",
+    "MERUC", "ZAP", "CRU", "CUS", "CUN", "CUZ", "UCDLL",
     "ZAPSP", "HH0", "ZASSP"
   )
 
