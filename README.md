@@ -52,7 +52,7 @@ source("csd_function_library.R")
 ```
 
 ---
-## 🔄 Dashboards & Apps Using This Kit
+## 🔄 Dashboards & Apps Using This Library
 
 - **ILL Borrowing Data Dashboard**: Interlibrary loan analytics
 - **Selector Assignment Tool**: Batch call number to selector matching
