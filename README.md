@@ -19,8 +19,8 @@ A centralized collection of R functions designed to streamline CSD data workflow
 ## 🚀 Functions
 
 ### Authentication
-* **`get_oclc_token()`**: Fetches a new OCLC access token for specified APIs (WorldCat Metadata/Search). |
-* **`ensure_valid_token()`**: Checks token expiration and auto-refreshes if necessary. |
+* **`get_oclc_token()`**: Fetches a new OCLC access token for specified APIs (WorldCat Metadata/Search). 
+* **`ensure_valid_token()`**: Checks token expiration and auto-refreshes if necessary. 
 
 ### Enrichment & Data Processing
 * **`enrich_lc_classification()`**: Hits the WorldCat Metadata API `classification-bibs` endpoint to retrieve the most frequent LC call number for a given OCLC list.
