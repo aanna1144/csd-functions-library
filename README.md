@@ -57,3 +57,6 @@ source("csd_function_library.R")
 - **ILL Borrowing Data Dashboard**: Interlibrary loan analytics
 - **Selector Assignment Tool**: Batch call number to selector matching
 - **UC Overlap Tool**: Selective & Batch checking of OCLC Numbers for UC Overlap
+
+
+AI Disclosure: Large language models (LLMs) were used to assist in writing, troubleshooting, and documenting the contents of this repository. All outputs were reviewed and validated by the developer.
