@@ -226,13 +226,19 @@ enrich_lc_classification <- function(data,
 # ║    ZAS, UCMER, BOL, UCILW, CUY, CUV, CUI, CLU, MERUC, ZAP, CRU,            ║
 # ║    CUS, CUN, CUZ, UCDLL, ZAPSP, HH0, ZASSP                                 ║
 # ║                                                                            ║
-# ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
-# ║  preserves the original row count exactly.                                 ║
+# ║  Optimized: uses req_perform_parallel() instead of a serial for loop.      ║
+# ║  Token checked once upfront rather than per iteration.                     ║
+# ║                                                                            ║
+# ║  max_active controls concurrent requests (default = 5, confirmed safe).    ║
+# ║  Do not exceed 50 — triggers OCLC rate limiting.                           ║
+# ║  Wait at least 45s between large runs.                                     ║
 # ║                                                                            ║
 # ║  Usage:                                                                    ║
-# ║    df <- df |> enrich_uc_overlap(oclc_col = "OCLC Number")                 ║
-# ║    df <- df |> enrich_uc_overlap(oclc_col = "OCLC Number",                 ║
-# ║                                  rlf_only = TRUE)                          ║
+# ║    df <- df |> enrich_uc_overlap_parallel(oclc_col = "OCLC Number")        ║
+# ║    df <- df |> enrich_uc_overlap_parallel(oclc_col = "OCLC Number",        ║
+# ║                                           rlf_only = TRUE)                 ║
+# ║    df <- df |> enrich_uc_overlap_parallel(oclc_col = "OCLC Number",        ║
+# ║                                           max_active = 5)                  ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
 enrich_uc_overlap_parallel <- function(data,
@@ -336,18 +342,25 @@ enrich_uc_overlap_parallel <- function(data,
 
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  FUNCTION 4: OCLC API — TOTAL HOLDING COUNT                                ║
+# ║  FUNCTION 4: OCLC API — US TOTAL HOLDING COUNT                             ║
 # ║                                                                            ║
-# ║  Uses the WorldCat Search API bibs-holdings endpoint (no symbol filter)    ║
-# ║  to get the total US holding count for each OCLC number.                   ║
+# ║  Uses the WorldCat Search API bibs-holdings endpoint filtered by           ║
+# ║  heldInCountry=US to get the total US holding count for each OCLC number.  ║
 # ║                                                                            ║
 # ║  Takes a data frame and the name of the column containing OCLC numbers.    ║
 # ║  Appends a new column (default: "Total_Holding_Count") with the result.    ║
-# ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
-# ║  preserves the original row count exactly.                                 ║
+# ║                                                                            ║
+# ║  Optimized: uses req_perform_parallel() instead of a serial for loop.      ║
+# ║  Token checked once upfront rather than per iteration.                     ║
+# ║                                                                            ║
+# ║  max_active controls concurrent requests (default = 5, confirmed safe).    ║
+# ║  Do not exceed 50 — triggers OCLC rate limiting.                           ║
+# ║  Wait at least 45s between large runs.                                     ║
 # ║                                                                            ║
 # ║  Usage:                                                                    ║
-# ║    df <- df |> enrich_total_holdings(oclc_col = "OCLC Number")             ║
+# ║    df <- df |> enrich_total_holdings_parallel(oclc_col = "OCLC Number")    ║
+# ║    df <- df |> enrich_total_holdings_parallel(oclc_col = "OCLC Number",    ║
+# ║                                              max_active = 5)               ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
 enrich_total_holdings_parallel <- function(data,
