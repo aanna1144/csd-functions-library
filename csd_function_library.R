@@ -224,7 +224,7 @@ enrich_lc_classification <- function(data,
 # ║    ZAS, ZAP, ZAPSP, HH0, ZASSP                                             ║
 # ║  Set rlf_only = FALSE (default) to check all UC symbols:                   ║
 # ║    ZAS, UCMER, BOL, UCILW, CUY, CUV, CUI, CLU, MERUC, ZAP, CRU,            ║
-# ║    CUS, CUN, CUZ, UCDLL, ZAPSP, HH0, ZASSP                            ║
+# ║    CUS, CUN, CUZ, UCDLL, ZAPSP, HH0, ZASSP                                 ║
 # ║                                                                            ║
 # ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
 # ║  preserves the original row count exactly.                                 ║
@@ -235,10 +235,11 @@ enrich_lc_classification <- function(data,
 # ║                                  rlf_only = TRUE)                          ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
-enrich_uc_overlap <- function(data,
+enrich_uc_overlap_parallel <- function(data,
                               oclc_col,
                               rlf_only      = FALSE,
                               new_col       = "UC_Libraries",
+                              max_active    = 5,
                               client_id     = NULL,
                               client_secret = NULL) {
 
@@ -250,10 +251,7 @@ enrich_uc_overlap <- function(data,
          call. = FALSE)
   }
 
-  # RLF-only symbols
-  rlf_symbols <- c("ZAS", "ZAP", "ZAPSP", "HH0", "ZASSP")
-
-  # Full UC symbol set
+  rlf_symbols    <- c("ZAS", "ZAP", "ZAPSP", "HH0", "ZASSP")
   all_uc_symbols <- c(
     "ZAS", "UCMER", "BOL", "UCILW", "CUY", "CUV", "CUI", "CLU",
     "MERUC", "ZAP", "CRU", "CUS", "CUN", "CUZ", "UCDLL",
@@ -263,74 +261,61 @@ enrich_uc_overlap <- function(data,
   symbols      <- if (rlf_only) rlf_symbols else all_uc_symbols
   symbol_param <- paste(symbols, collapse = ",")
 
-  original_n <- nrow(data)
-
-  # Work with unique OCLC numbers only
+  original_n  <- nrow(data)
   oclc_values <- data[[oclc_col]]
   unique_oclc <- unique(na.omit(as.character(oclc_values)))
   n_unique    <- length(unique_oclc)
 
   label <- if (rlf_only) "RLF" else "UC"
   message("Checking ", label, " holdings overlap for ", n_unique,
-          " unique OCLC numbers (", length(symbols), " symbols)...")
+          " unique OCLC numbers (", length(symbols), " symbols, max_active=", max_active, ")...")
 
-  results <- character(n_unique)
-  pb      <- txtProgressBar(min = 0, max = n_unique, style = 3)
+  # ── Token once ───────────────────────────────────────────────────────────────
+  token <- ensure_valid_token(api = "search",
+                              client_id = client_id,
+                              client_secret = client_secret)
 
-  for (i in seq_along(unique_oclc)) {
+  # ── One request per OCLC number ───────────────────────────────────────────────
+  requests <- lapply(unique_oclc, function(oclc) {
+    request(paste0(
+      "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
+      "?oclcNumber=", oclc,
+      "&heldBySymbol=", symbol_param, "&heldInCountry=", "US"
+    )) |>
+      req_headers(Authorization = paste("Bearer", token), Accept = "application/json") |>
+      req_retry(max_tries = 3, backoff = ~2^.x)
+  })
 
-    token <- ensure_valid_token(api = "search",
-                                client_id = client_id,
-                                client_secret = client_secret)
+  # ── Fire in parallel ──────────────────────────────────────────────────────────
+  responses <- req_perform_parallel(requests, max_active = max_active, on_error = "continue")
 
-    results[i] <- tryCatch({
-      resp <- request(paste0(
-        "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
-        "?oclcNumber=", unique_oclc[i],
-        "&heldBySymbol=", symbol_param
-      )) |>
-        req_headers(
-          Authorization = paste("Bearer", token),
-          Accept        = "application/json"
-        ) |>
-        req_perform()
-
-      data_resp  <- resp_body_json(resp)
-      brief_recs <- data_resp$briefRecords
-
-      if (is.null(brief_recs) || length(brief_recs) == 0) {
-        NA_character_
-      }
+  # ── Parse: one result per response ───────────────────────────────────────────
+  result_vec <- vapply(seq_along(responses), function(i) {
+    tryCatch({
+      data_resp      <- resp_body_json(responses[[i]])
+      brief_recs     <- data_resp$briefRecords
+      if (is.null(brief_recs) || length(brief_recs) == 0) return(NA_character_)
 
       brief_holdings <- brief_recs[[1]]$institutionHolding$briefHoldings
+      if (is.null(brief_holdings) || length(brief_holdings) == 0) return(NA_character_)
 
-      if (is.null(brief_holdings) || length(brief_holdings) == 0) {
-        NA_character_
-      }
-
-      # Extract institution names
       names_vec <- vapply(
         brief_holdings,
         function(h) if (!is.null(h$institutionName)) h$institutionName else NA_character_,
         character(1)
       )
       names_vec <- names_vec[!is.na(names_vec)]
-
       if (length(names_vec) == 0) NA_character_ else paste(names_vec, collapse = "|")
 
-    }, error = function(e) {
-      NA_character_
-    })
+    }, error = function(e) NA_character_)
+  }, character(1))
 
-    setTxtProgressBar(pb, i)
-  }
+  names(result_vec) <- unique_oclc
 
-  close(pb)
-
-  # Build lookup and join back
+  # ── Build lookup and join back ────────────────────────────────────────────────
   lookup <- tibble(
-    .oclc_key   = unique_oclc,
-    !!new_col := results
+    .oclc_key  = names(result_vec),
+    !!new_col := unname(result_vec)
   )
 
   data$.oclc_key <- as.character(oclc_values)
@@ -349,11 +334,12 @@ enrich_uc_overlap <- function(data,
 }
 
 
+
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  FUNCTION 4: OCLC API — TOTAL HOLDING COUNT                                ║
 # ║                                                                            ║
 # ║  Uses the WorldCat Search API bibs-holdings endpoint (no symbol filter)    ║
-# ║  to get the total worldwide holding count for each OCLC number.            ║
+# ║  to get the total US holding count for each OCLC number.                   ║
 # ║                                                                            ║
 # ║  Takes a data frame and the name of the column containing OCLC numbers.    ║
 # ║  Appends a new column (default: "Total_Holding_Count") with the result.    ║
@@ -364,9 +350,10 @@ enrich_uc_overlap <- function(data,
 # ║    df <- df |> enrich_total_holdings(oclc_col = "OCLC Number")             ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
-enrich_total_holdings <- function(data,
+enrich_total_holdings_parallel <- function(data,
                                   oclc_col,
                                   new_col       = "Total_Holding_Count",
+                                  max_active    = 5,
                                   client_id     = NULL,
                                   client_secret = NULL) {
 
@@ -378,59 +365,52 @@ enrich_total_holdings <- function(data,
          call. = FALSE)
   }
 
-  original_n <- nrow(data)
-
-  # Work with unique OCLC numbers only
+  original_n  <- nrow(data)
   oclc_values <- data[[oclc_col]]
   unique_oclc <- unique(na.omit(as.character(oclc_values)))
   n_unique    <- length(unique_oclc)
 
-  message("Fetching total holding counts for ", n_unique, " unique OCLC numbers...")
+  message("Fetching total holding counts for ", n_unique,
+          " unique OCLC numbers (max_active=", max_active, ")...")
 
-  results <- integer(n_unique)
-  pb      <- txtProgressBar(min = 0, max = n_unique, style = 3)
+  # ── Token once ───────────────────────────────────────────────────────────────
+  token <- ensure_valid_token(api = "search",
+                              client_id = client_id,
+                              client_secret = client_secret)
 
-  for (i in seq_along(unique_oclc)) {
+  # ── One request per OCLC number ───────────────────────────────────────────────
+  requests <- lapply(unique_oclc, function(oclc) {
+    request(paste0(
+      "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
+      "?oclcNumber=", oclc, "&heldInCountry=", "US"
+      
+    )) |>
+      req_headers(Authorization = paste("Bearer", token), Accept = "application/json") |>
+      req_retry(max_tries = 3, backoff = ~2^.x)
+  })
 
-    token <- ensure_valid_token(api = "search",
-                                client_id = client_id,
-                                client_secret = client_secret)
+  # ── Fire in parallel ──────────────────────────────────────────────────────────
+  responses <- req_perform_parallel(requests, max_active = max_active, on_error = "continue")
 
-    results[i] <- tryCatch({
-      resp <- request(paste0(
-        "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
-        "?oclcNumber=", unique_oclc[i]
-      )) |>
-        req_headers(
-          Authorization = paste("Bearer", token),
-          Accept        = "application/json"
-        ) |>
-        req_perform()
-
-      data_resp  <- resp_body_json(resp)
+  # ── Parse: one result per response ───────────────────────────────────────────
+  result_vec <- vapply(seq_along(responses), function(i) {
+    tryCatch({
+      data_resp  <- resp_body_json(responses[[i]])
       brief_recs <- data_resp$briefRecords
-
-      if (is.null(brief_recs) || length(brief_recs) == 0) {
-        NA_integer_
-      }
+      if (is.null(brief_recs) || length(brief_recs) == 0) return(NA_integer_)
 
       count <- brief_recs[[1]]$institutionHolding$totalHoldingCount
-
       if (is.null(count)) NA_integer_ else as.integer(count)
 
-    }, error = function(e) {
-      NA_integer_
-    })
+    }, error = function(e) NA_integer_)
+  }, integer(1))
 
-    setTxtProgressBar(pb, i)
-  }
+  names(result_vec) <- unique_oclc
 
-  close(pb)
-
-  # Build lookup and join back
+  # ── Build lookup and join back ────────────────────────────────────────────────
   lookup <- tibble(
-    .oclc_key   = unique_oclc,
-    !!new_col := results
+    .oclc_key  = names(result_vec),
+    !!new_col := unname(result_vec)
   )
 
   data$.oclc_key <- as.character(oclc_values)
