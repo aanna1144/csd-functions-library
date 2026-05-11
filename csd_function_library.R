@@ -227,7 +227,8 @@ enrich_lc_classification <- function(data,
 # ║    CUS, CUN, CUZ, UCDLL, ZAPSP, HH0, ZASSP                                 ║
 # ║                                                                            ║
 # ║  Optimized: uses req_perform_parallel() instead of a serial for loop.      ║
-# ║  Token checked once upfront rather than per iteration.                     ║
+# ║  Deduplicates OCLC numbers for performance and preserves the original      ║
+# ║  row count exactly. Token checked once upfront rather than per iteration.  ║
 # ║                                                                            ║
 # ║  max_active controls concurrent requests (default = 5, confirmed safe).    ║
 # ║  Do not exceed 50 — triggers OCLC rate limiting.                           ║
@@ -351,7 +352,8 @@ enrich_uc_overlap_parallel <- function(data,
 # ║  Appends a new column (default: "Total_Holding_Count") with the result.    ║
 # ║                                                                            ║
 # ║  Optimized: uses req_perform_parallel() instead of a serial for loop.      ║
-# ║  Token checked once upfront rather than per iteration.                     ║
+# ║  Deduplicates OCLC numbers for performance and preserves the original      ║
+# ║  row count exactly. Token checked once upfront rather than per iteration.  ║
 # ║                                                                            ║
 # ║  max_active controls concurrent requests (default = 5, confirmed safe).    ║
 # ║  Do not exceed 50 — triggers OCLC rate limiting.                           ║
