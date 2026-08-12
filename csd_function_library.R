@@ -210,6 +210,7 @@ enrich_lc_classification <- function(data,
   data
 }
 
+
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  FUNCTION 3: OCLC API — UC HOLDINGS OVERLAP                                ║
 # ║                                                                            ║
@@ -229,10 +230,147 @@ enrich_lc_classification <- function(data,
 # ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
 # ║  preserves the original row count exactly.                                 ║
 # ║                                                                            ║
+# ║  This is the SEQUENTIAL (one-request-at-a-time) version. For large         ║
+# ║  batches, see enrich_uc_overlap_parallel() below, which fires requests     ║
+# ║  concurrently instead.                                                     ║
+# ║                                                                            ║
 # ║  Usage:                                                                    ║
 # ║    df <- df |> enrich_uc_overlap(oclc_col = "OCLC Number")                 ║
 # ║    df <- df |> enrich_uc_overlap(oclc_col = "OCLC Number",                 ║
 # ║                                  rlf_only = TRUE)                          ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+enrich_uc_overlap <- function(data,
+                              oclc_col,
+                              rlf_only      = FALSE,
+                              new_col       = "UC_Libraries",
+                              client_id     = NULL,
+                              client_secret = NULL) {
+
+  client_id     <- client_id     %||% Sys.getenv("OCLC_CLIENT_ID_WCSearchAPI")
+  client_secret <- client_secret %||% Sys.getenv("OCLC_CLIENT_SECRET_WCSearchAPI")
+
+  if (client_id == "" || client_secret == "") {
+    stop("OCLC Search API credentials not found. Set OCLC_CLIENT_ID_WCSearchAPI and OCLC_CLIENT_SECRET_WCSearchAPI in .Renviron.",
+         call. = FALSE)
+  }
+
+  # RLF-only symbols
+  rlf_symbols <- c("ZAS", "ZAP", "ZAPSP", "HH0", "ZASSP")
+
+  # Full UC symbol set
+  all_uc_symbols <- c(
+    "ZAS", "UCMER", "BOL", "UCILW", "CUY", "CUV", "CUI", "CLU",
+    "MERUC", "ZAP", "CRU", "CUS", "CUN", "CUZ", "UCDLL",
+    "ZAPSP", "HH0", "ZASSP"
+  )
+
+  symbols      <- if (rlf_only) rlf_symbols else all_uc_symbols
+  symbol_param <- paste(symbols, collapse = ",")
+
+  original_n <- nrow(data)
+
+  # Work with unique OCLC numbers only
+  oclc_values <- data[[oclc_col]]
+  unique_oclc <- unique(na.omit(as.character(oclc_values)))
+  n_unique    <- length(unique_oclc)
+
+  label <- if (rlf_only) "RLF" else "UC"
+  message("Checking ", label, " holdings overlap for ", n_unique,
+          " unique OCLC numbers (", length(symbols), " symbols)...")
+
+  results <- character(n_unique)
+  pb      <- txtProgressBar(min = 0, max = n_unique, style = 3)
+
+  for (i in seq_along(unique_oclc)) {
+
+    token <- ensure_valid_token(api = "search",
+                                client_id = client_id,
+                                client_secret = client_secret)
+
+    results[i] <- tryCatch({
+      resp <- request(paste0(
+        "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
+        "?oclcNumber=", unique_oclc[i],
+        "&heldBySymbol=", symbol_param
+      )) |>
+        req_headers(
+          Authorization = paste("Bearer", token),
+          Accept        = "application/json"
+        ) |>
+        req_perform()
+
+      data_resp  <- resp_body_json(resp)
+      brief_recs <- data_resp$briefRecords
+
+      if (is.null(brief_recs) || length(brief_recs) == 0) {
+        NA_character_
+      }
+
+      brief_holdings <- brief_recs[[1]]$institutionHolding$briefHoldings
+
+      if (is.null(brief_holdings) || length(brief_holdings) == 0) {
+        NA_character_
+      }
+
+      # Extract institution names
+      names_vec <- vapply(
+        brief_holdings,
+        function(h) if (!is.null(h$institutionName)) h$institutionName else NA_character_,
+        character(1)
+      )
+      names_vec <- names_vec[!is.na(names_vec)]
+
+      if (length(names_vec) == 0) NA_character_ else paste(names_vec, collapse = "|")
+
+    }, error = function(e) {
+      NA_character_
+    })
+
+    setTxtProgressBar(pb, i)
+  }
+
+  close(pb)
+
+  # Build lookup and join back
+  lookup <- tibble(
+    .oclc_key   = unique_oclc,
+    !!new_col := results
+  )
+
+  data$.oclc_key <- as.character(oclc_values)
+  data <- left_join(data, lookup, by = ".oclc_key")
+  data$.oclc_key <- NULL
+
+  stopifnot(
+    "Row count changed after UC overlap enrichment — this should never happen." =
+      nrow(data) == original_n
+  )
+
+  matched <- sum(!is.na(data[[new_col]]))
+  message("Done. ", matched, " of ", original_n, " rows had ", label, " holdings.")
+
+  data
+}
+
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  FUNCTION 3b: OCLC API — UC HOLDINGS OVERLAP (PARALLEL)                    ║
+# ║                                                                            ║
+# ║  Same as enrich_uc_overlap() above, but fires requests concurrently        ║
+# ║  instead of one at a time -- much faster for large batches. Use this       ║
+# ║  version unless you have a specific reason to prefer sequential            ║
+# ║  requests (e.g. debugging, or a very small batch where the difference      ║
+# ║  doesn't matter).                                                          ║
+# ║                                                                            ║
+# ║  Same parameters as enrich_uc_overlap(), plus max_active (default 5),      ║
+# ║  which controls how many requests run at once -- empirically confirmed     ║
+# ║  safe against OCLC's infrastructure at this level.                         ║
+# ║                                                                            ║
+# ║  Usage:                                                                    ║
+# ║    df <- df |> enrich_uc_overlap_parallel(oclc_col = "OCLC Number")        ║
+# ║    df <- df |> enrich_uc_overlap_parallel(oclc_col = "OCLC Number",        ║
+# ║                                           rlf_only = TRUE)                 ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
 enrich_uc_overlap_parallel <- function(data,
@@ -270,12 +408,12 @@ enrich_uc_overlap_parallel <- function(data,
   message("Checking ", label, " holdings overlap for ", n_unique,
           " unique OCLC numbers (", length(symbols), " symbols, max_active=", max_active, ")...")
 
-  # ── Token once ───────────────────────────────────────────────────────────────
+  # Token once
   token <- ensure_valid_token(api = "search",
                               client_id = client_id,
                               client_secret = client_secret)
 
-  # ── One request per OCLC number ───────────────────────────────────────────────
+  # One request per OCLC number
   requests <- lapply(unique_oclc, function(oclc) {
     request(paste0(
       "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
@@ -286,10 +424,10 @@ enrich_uc_overlap_parallel <- function(data,
       req_retry(max_tries = 3, backoff = ~2^.x)
   })
 
-  # ── Fire in parallel ──────────────────────────────────────────────────────────
+  # Fire in parallel
   responses <- req_perform_parallel(requests, max_active = max_active, on_error = "continue")
 
-  # ── Parse: one result per response ───────────────────────────────────────────
+  # Parse: one result per response
   result_vec <- vapply(seq_along(responses), function(i) {
     tryCatch({
       data_resp      <- resp_body_json(responses[[i]])
@@ -312,7 +450,7 @@ enrich_uc_overlap_parallel <- function(data,
 
   names(result_vec) <- unique_oclc
 
-  # ── Build lookup and join back ────────────────────────────────────────────────
+  # Build lookup and join back 
   lookup <- tibble(
     .oclc_key  = names(result_vec),
     !!new_col := unname(result_vec)
@@ -334,20 +472,125 @@ enrich_uc_overlap_parallel <- function(data,
 }
 
 
-
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  FUNCTION 4: OCLC API — TOTAL HOLDING COUNT                                ║
 # ║                                                                            ║
 # ║  Uses the WorldCat Search API bibs-holdings endpoint (no symbol filter)    ║
-# ║  to get the total US holding count for each OCLC number.                   ║
+# ║  to get the total worldwide holding count for each OCLC number.            ║
 # ║                                                                            ║
 # ║  Takes a data frame and the name of the column containing OCLC numbers.    ║
 # ║  Appends a new column (default: "Total_Holding_Count") with the result.    ║
 # ║  Deduplicates OCLC numbers for performance, shows a progress bar, and      ║
 # ║  preserves the original row count exactly.                                 ║
 # ║                                                                            ║
+# ║  This is the SEQUENTIAL (one-request-at-a-time) version. For large         ║
+# ║  batches, see enrich_total_holdings_parallel() below, which fires          ║
+# ║  requests concurrently instead.                                            ║
+# ║                                                                            ║
 # ║  Usage:                                                                    ║
 # ║    df <- df |> enrich_total_holdings(oclc_col = "OCLC Number")             ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+
+enrich_total_holdings <- function(data,
+                                  oclc_col,
+                                  new_col       = "Total_Holding_Count",
+                                  client_id     = NULL,
+                                  client_secret = NULL) {
+
+  client_id     <- client_id     %||% Sys.getenv("OCLC_CLIENT_ID_WCSearchAPI")
+  client_secret <- client_secret %||% Sys.getenv("OCLC_CLIENT_SECRET_WCSearchAPI")
+
+  if (client_id == "" || client_secret == "") {
+    stop("OCLC Search API credentials not found. Set OCLC_CLIENT_ID_WCSearchAPI and OCLC_CLIENT_SECRET_WCSearchAPI in .Renviron.",
+         call. = FALSE)
+  }
+
+  original_n <- nrow(data)
+
+  # Work with unique OCLC numbers only
+  oclc_values <- data[[oclc_col]]
+  unique_oclc <- unique(na.omit(as.character(oclc_values)))
+  n_unique    <- length(unique_oclc)
+
+  message("Fetching total holding counts for ", n_unique, " unique OCLC numbers...")
+
+  results <- integer(n_unique)
+  pb      <- txtProgressBar(min = 0, max = n_unique, style = 3)
+
+  for (i in seq_along(unique_oclc)) {
+
+    token <- ensure_valid_token(api = "search",
+                                client_id = client_id,
+                                client_secret = client_secret)
+
+    results[i] <- tryCatch({
+      resp <- request(paste0(
+        "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
+        "?oclcNumber=", unique_oclc[i]
+      )) |>
+        req_headers(
+          Authorization = paste("Bearer", token),
+          Accept        = "application/json"
+        ) |>
+        req_perform()
+
+      data_resp  <- resp_body_json(resp)
+      brief_recs <- data_resp$briefRecords
+
+      if (is.null(brief_recs) || length(brief_recs) == 0) {
+        NA_integer_
+      }
+
+      count <- brief_recs[[1]]$institutionHolding$totalHoldingCount
+
+      if (is.null(count)) NA_integer_ else as.integer(count)
+
+    }, error = function(e) {
+      NA_integer_
+    })
+
+    setTxtProgressBar(pb, i)
+  }
+
+  close(pb)
+
+  # Build lookup and join back
+  lookup <- tibble(
+    .oclc_key   = unique_oclc,
+    !!new_col := results
+  )
+
+  data$.oclc_key <- as.character(oclc_values)
+  data <- left_join(data, lookup, by = ".oclc_key")
+  data$.oclc_key <- NULL
+
+  stopifnot(
+    "Row count changed after holding count enrichment — this should never happen." =
+      nrow(data) == original_n
+  )
+
+  matched <- sum(!is.na(data[[new_col]]))
+  message("Done. ", matched, " of ", original_n, " rows got a holding count.")
+
+  data
+}
+
+
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  FUNCTION 4b: OCLC API — TOTAL HOLDING COUNT (PARALLEL, US ONLY)           ║
+# ║                                                                            ║
+# ║  Same idea as enrich_total_holdings() above, but fires requests            ║
+# ║  concurrently instead of one at a time, and filters to US holdings only    ║
+# ║  (&heldInCountry=US) rather than a worldwide count. These are genuinely    ║
+# ║  different in scope, not just speed -- pick whichever matches what you     ║
+# ║  actually need (worldwide vs. US-only).                                    ║
+# ║                                                                            ║
+# ║  Same parameters as enrich_total_holdings(), plus max_active (default 5),  ║
+# ║  which controls how many requests run at once -- empirically confirmed     ║
+# ║  safe against OCLC's infrastructure at this level.                         ║
+# ║                                                                            ║
+# ║  Usage:                                                                    ║
+# ║    df <- df |> enrich_total_holdings_parallel(oclc_col = "OCLC Number")    ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
 enrich_total_holdings_parallel <- function(data,
@@ -373,26 +616,26 @@ enrich_total_holdings_parallel <- function(data,
   message("Fetching total holding counts for ", n_unique,
           " unique OCLC numbers (max_active=", max_active, ")...")
 
-  # ── Token once ───────────────────────────────────────────────────────────────
+  # Token once 
   token <- ensure_valid_token(api = "search",
                               client_id = client_id,
                               client_secret = client_secret)
 
-  # ── One request per OCLC number ───────────────────────────────────────────────
+  # One request per OCLC number 
   requests <- lapply(unique_oclc, function(oclc) {
     request(paste0(
       "https://americas.discovery.api.oclc.org/worldcat/search/v2/bibs-holdings",
       "?oclcNumber=", oclc, "&heldInCountry=", "US"
-      
+
     )) |>
       req_headers(Authorization = paste("Bearer", token), Accept = "application/json") |>
       req_retry(max_tries = 3, backoff = ~2^.x)
   })
 
-  # ── Fire in parallel ──────────────────────────────────────────────────────────
+  # Fire in parallel 
   responses <- req_perform_parallel(requests, max_active = max_active, on_error = "continue")
 
-  # ── Parse: one result per response ───────────────────────────────────────────
+  # Parse: one result per response 
   result_vec <- vapply(seq_along(responses), function(i) {
     tryCatch({
       data_resp  <- resp_body_json(responses[[i]])
@@ -407,7 +650,7 @@ enrich_total_holdings_parallel <- function(data,
 
   names(result_vec) <- unique_oclc
 
-  # ── Build lookup and join back ────────────────────────────────────────────────
+  # Build lookup and join back 
   lookup <- tibble(
     .oclc_key  = names(result_vec),
     !!new_col := unname(result_vec)
@@ -427,6 +670,7 @@ enrich_total_holdings_parallel <- function(data,
 
   data
 }
+
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  FUNCTION 5: SELECTOR ASSIGNMENT                                           ║
@@ -597,25 +841,47 @@ enrich_vernacular_title <- function(data,
 # ║  FUNCTION 7: HATHITRUST API — RIGHTS STATUS & CATALOG URL                  ║
 # ║                                                                            ║
 # ║  Uses HathiTrust's public Bibliographic API to look up rights status and   ║
-# ║  a catalog URL for each identifier in a data frame. No API key required    ║
+# ║    id_col + id_type  -- one identifier column, one type ("oclc", "isbn",   ║
+# ║                         "issn", or "lccn")                                 ║
+# ║  OR                                                                        ║
+# ║    id_cols           -- a vector of multiple columns, in priority          ║
+# ║                         order, e.g. c(oclc = "OCLC No.", issn = "ISSN",    ║
+# ║                         isbn = "ISBN"). For each row, tries each column    ║
+# ║                         in that order and uses the first one that isn't    ║
+# ║                         blank -- e.g. OCLC if present, else fall back to   ║
+# ║                         ISSN, else ISBN. Different rows can end up using   ║
+# ║                         different identifier types                         ║
+# ║  Supply one of these two, not both.                                        ║
 # ║                                                                            ║
-# ║  Takes a data frame and the name of the column containing identifiers.     ║
-# ║  id_type can be "oclc", "isbn", "issn", or "lccn" (default "oclc").        ║
-# ║                                                                            ║
-# ║  Appends 4 columns with the full rights picture, not a collapsed           ║
-# ║  Yes/No (that binary form is useful only for comparing against             ║
-# ║  GreenGlass-style exports -- see validate_hathitrust.R):                   ║
-# ║    "HathiTrust Rights Status"       - raw usRightsString ("Full view" /    ║
+# ║  Appends EIGHT columns                                                     ║
+# ║    "HathiTrust Rights Status"      -- raw usRightsString ("Full view" /    ║
 # ║                                       "Limited (search-only)")             ║
-# ║    "HathiTrust Rights Code"         - raw rightsCode(s), e.g. "pd",        ║
+# ║    "HathiTrust Rights Code"        -- raw rightsCode(s), e.g. "pd",        ║
 # ║                                       "cc-by-4.0"; semicolon-joined if     ║
 # ║                                       a title's items disagree             ║
-# ║    "HathiTrust Rights Description"  - rightsCode(s) mapped to their full   ║
+# ║    "HathiTrust Rights Description" -- rightsCode(s) mapped to their full   ║
 # ║                                       description via HATHITRUST_RIGHTS_   ║
 # ║                                       CODES (sourced from HathiTrust's     ║
 # ║                                       Rights Database docs)                ║
-# ║    "HathiTrust URL"                 - link to the catalog record           ║
-# ║                                                                            ║
+# ║    "HathiTrust URL"                -- one deterministic "primary" link     ║
+# ║                                       to the catalog record                ║
+# ║    "HathiTrust URL (All Records)"  -- every matched record's URL, if a     ║
+# ║                                       title matches more than one          ║
+# ║    "HathiTrust ID Type Used"       -- which id_type actually resolved      ║
+# ║                                       this row (mainly useful in           ║
+# ║                                       id_cols/priority-fallback mode,      ║
+# ║                                       where it can vary row to row)        ║
+# ║    "HathiTrust ID Value Used"      -- the normalized identifier value      ║
+# ║                                       actually queried for this row        ║
+# ║                                       (which of id_cols' columns won,      ║
+# ║                                       after normalize_identifier())        ║
+# ║    "HathiTrust Manual Check URL"   -- pre-built search link so a           ║
+# ║                                       librarian can manually search        ║
+# ║                                       HathiTrust's broader catalog --      ║
+# ║                                       useful since a "Not Found" can       ║
+# ║                                       mean the title is catalogued         ║
+# ║                                       under a different identifier         ║
+# ║                                       than the one queried.                ║
 # ║                                                                            ║
 # ║  Identifiers are normalized and deduplicated before querying               ║
 # ║                                                                            ║
@@ -626,18 +892,16 @@ enrich_vernacular_title <- function(data,
 # ║  Requests are fired sequentially with a pause of `delay_seconds`           ║
 # ║  (default 0.3s) between each.                                              ║
 # ║                                                                            ║
-# ║  checkpoint_path (optional): pass a file path to persist results as they   ║
-# ║  come in and resume automatically on the next call, skipping identifiers   ║
-# ║  already resolved. Recommended for very large one-off runs (tens of        ║
-# ║  thousands of identifiers+), so an interruption doesn't lose progress.     ║
 # ║                                                                            ║
 # ║  Usage:                                                                    ║
 # ║    df <- df |> enrich_hathitrust(id_col = "OCLC Number")                   ║
 # ║    df <- df |> enrich_hathitrust(id_col = "ISBN", id_type = "isbn")        ║
+# ║    df <- df |> enrich_hathitrust(id_cols = c(oclc = "OCLC No.",            ║
+# ║                                              issn = "ISSN",                ║
+# ║                                              isbn = "ISBN"))               ║
 # ║    df <- df |> enrich_hathitrust(id_col = "OCLC Number",                   ║
 # ║                                  checkpoint_path = "ht_checkpoint.csv")    ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
-
 
 #  Identifier normalization 
 # Real library data is messy in predictable ways. Without this, identifiers
@@ -680,7 +944,7 @@ HATHITRUST_RIGHTS_CODES <- c(
   "pd-pvt"          = "Public domain, but access limited due to privacy concerns",
   "supp"            = "Suppressed from view"
 )
- 
+
 normalize_identifier <- function(x, id_type) {
   x <- trimws(x)
 
@@ -723,10 +987,10 @@ enrich_hathitrust <- function(data,
                               chunk_size       = 20,
                               delay_seconds    = 0.3,
                               checkpoint_path  = NULL) {
- 
+
   valid_types <- c("oclc", "isbn", "issn", "lccn")
- 
-  #  Input validation: exactly one of id_col or id_cols must be given 
+
+  # Input validation: exactly one of id_col or id_cols must be given 
   if (is.null(id_col) && is.null(id_cols)) {
     stop("Must supply either id_col (a single identifier column) or id_cols ",
          "(a named vector of columns in priority order, e.g. c(oclc = ",
@@ -735,7 +999,7 @@ enrich_hathitrust <- function(data,
   if (!is.null(id_col) && !is.null(id_cols)) {
     stop("Supply either id_col or id_cols, not both.", call. = FALSE)
   }
- 
+
   if (!is.null(id_cols)) {
     if (is.null(names(id_cols)) || any(names(id_cols) == "")) {
       stop("id_cols must be a named vector -- names give the id_type per ",
@@ -758,16 +1022,16 @@ enrich_hathitrust <- function(data,
       stop(sprintf("Column '%s' not found in data frame.", id_col), call. = FALSE)
     }
   }
- 
+
   if (chunk_size > 20) {
     warning("chunk_size > 20 requested; HathiTrust's documented cap is 20. Clamping to 20.",
             call. = FALSE)
     chunk_size <- 20
   }
- 
+
   original_n <- nrow(data)
- 
-  #  Resolve, per row, which identifier to actually use. 
+
+  # Resolve, per row, which identifier to actually use. 
   # Single-column mode (id_col/id_type): every row uses the same type.
   # Multi-column mode (id_cols): tries each column in the order given,
   # taking the first one that isn't blank/NA for that row -- e.g. OCLC first,
@@ -775,7 +1039,7 @@ enrich_hathitrust <- function(data,
   if (!is.null(id_cols)) {
     chosen_type <- rep(NA_character_, original_n)
     chosen_raw  <- rep(NA_character_, original_n)
- 
+
     for (t in names(id_cols)) {
       col <- id_cols[[t]]
       raw_vals <- trimws(as.character(data[[col]]))
@@ -784,7 +1048,7 @@ enrich_hathitrust <- function(data,
       chosen_type[needs_fill] <- t
       chosen_raw[needs_fill]  <- raw_vals[needs_fill]
     }
- 
+
     clean_ids <- rep(NA_character_, original_n)
     for (t in unique(stats::na.omit(chosen_type))) {
       rows_t <- which(chosen_type == t)
@@ -792,7 +1056,7 @@ enrich_hathitrust <- function(data,
     }
     id_type_per_row <- chosen_type
     id_type_per_row[is.na(clean_ids)] <- NA_character_
- 
+
     message("Priority order for identifiers: ", paste(names(id_cols), collapse = " > "))
   } else {
     id_values <- data[[id_col]]
@@ -800,25 +1064,24 @@ enrich_hathitrust <- function(data,
     id_type_per_row <- rep(id_type, original_n)
     id_type_per_row[is.na(clean_ids)] <- NA_character_
   }
- 
+
   # Combined key ("type:value") -- used for dedup/chunking/checkpointing so
   # an identifier is never ambiguous about which id_type it was queried as
-  # (matters once more than one type can appear in the same run).
   combined_key <- ifelse(is.na(clean_ids) | is.na(id_type_per_row), NA_character_,
                           paste0(id_type_per_row, ":", clean_ids))
- 
+
   key_df <- data.frame(key = combined_key, type = id_type_per_row, value = clean_ids,
                         stringsAsFactors = FALSE)
   key_df <- key_df[!is.na(key_df$key), ]
   unique_keys_df <- key_df[!duplicated(key_df$key), ]
   n_unique <- nrow(unique_keys_df)
- 
+
   message("Looking up HathiTrust rights status for ", n_unique, " unique identifier(s) ",
           "(chunk_size=", chunk_size, ", delay_seconds=", delay_seconds, ")...")
- 
+
   # Checkpoint support: for very large or long-running jobs, skip
   # identifiers already resolved in a previous (possibly interrupted) run,
-  # and continue to give new results as we go so a crash mid-run doesn't lose
+  # and persist new results as we go so a crash mid-run doesn't lose
   # everything already looked up. 
   checkpoint_data <- NULL
   if (!is.null(checkpoint_path) && file.exists(checkpoint_path)) {
@@ -838,23 +1101,23 @@ enrich_hathitrust <- function(data,
     message("Resuming from checkpoint: ", nrow(checkpoint_data),
             " identifiers already resolved in ", checkpoint_path)
   }
- 
+
   already_done <- if (!is.null(checkpoint_data)) checkpoint_data$identifier else character(0)
   keys_to_query <- setdiff(unique_keys_df$key, already_done)
   pending <- unique_keys_df[match(keys_to_query, unique_keys_df$key), ]
- 
+
   if (nrow(pending) < n_unique) {
     message(n_unique - nrow(pending), " of ", n_unique,
             " identifiers already in checkpoint; querying the remaining ",
             nrow(pending), ".")
   }
- 
+
   chunks <- if (nrow(pending) > 0) {
     split(seq_len(nrow(pending)), ceiling(seq_len(nrow(pending)) / chunk_size))
   } else {
     list()
   }
- 
+
   # Build one request per chunk. HathiTrust's multi-id search spec allows
   # mixing identifier types within a single request (e.g. an OCLC number
   # and an ISSN together) -- each entry carries its own type, so a
@@ -872,10 +1135,10 @@ enrich_hathitrust <- function(data,
       req_user_agent("csd-functions-library (UCSB Library Collection Strategies)") |>
       req_retry(max_tries = 3, backoff = ~2^.x)
   })
- 
-  # ── Fetch, parse, and checkpoint ONE CHUNK AT A TIME -- an interruption
-  #    risks losing at most one chunk's worth of identifiers, not the whole
-  #    run. Results are keyed on the combined "type:value" key. ────────────
+
+  # Fetch, parse, and checkpoint ONE CHUNK AT A TIME -- an interruption
+  # risks losing at most one chunk's worth of identifiers, not the whole
+  # run. Results are keyed on the combined "type:value" key. 
   status_vec     <- character(nrow(pending))
   code_vec       <- character(nrow(pending))
   desc_vec       <- character(nrow(pending))
@@ -884,7 +1147,7 @@ enrich_hathitrust <- function(data,
   manual_url_vec <- character(nrow(pending))
   names(status_vec) <- names(code_vec) <- names(desc_vec) <- names(url_vec) <-
     names(url_all_vec) <- names(manual_url_vec) <- pending$key
- 
+
   running_results <- if (!is.null(checkpoint_data)) {
     checkpoint_data[, c("identifier", "status", "code", "desc", "url", "url_all", "manual_url")]
   } else {
@@ -892,32 +1155,32 @@ enrich_hathitrust <- function(data,
                desc = character(0), url = character(0), url_all = character(0),
                manual_url = character(0), stringsAsFactors = FALSE)
   }
- 
+
   for (c_i in seq_along(chunks)) {
     idx <- chunks[[c_i]]
- 
+
     resp   <- tryCatch(req_perform(requests[[c_i]]), error = function(e) NULL)
     parsed <- if (is.null(resp)) NULL else tryCatch(resp_body_json(resp), error = function(e) NULL)
- 
+
     for (i in seq_along(idx)) {
       row <- idx[i]
       key <- pending$key[row]
- 
+
       # Built for every identifier regardless of outcome -- most useful on
       # "Not Found"/"Error" rows, so a librarian can manually search
       # HathiTrust's broader catalog (not just an exact-identifier match)
       # in case the title exists under a different identifier than the one
       # queried -- exactly the pattern found during validation (e.g. a
       # record attached to a different OCLC number than the source data).
-      # NOTE: this search URL format (VuFind-style) has not been confirmed
-      # live against HathiTrust's catalog -- test one manually before
-      # relying on it.
+      # NOTE: this search URL format (VuFind-style) was confirmed live --
+      # a test OCLC number correctly returned exactly 1 precise result via
+      # this exact URL pattern, not a noisy keyword match.
       manual_url_vec[key] <- paste0(
         "https://catalog.hathitrust.org/Search/Home?lookfor=",
         utils::URLencode(pending$value[row], reserved = TRUE),
         "&type=all"
       )
- 
+
       if (is.null(parsed)) {
         status_vec[key]  <- "Error"
         code_vec[key]    <- "Error"
@@ -926,11 +1189,11 @@ enrich_hathitrust <- function(data,
         url_all_vec[key] <- NA_character_
         next
       }
- 
+
       entry   <- parsed[[as.character(i)]]
       records <- entry$records
       items   <- entry$items
- 
+
       if (is.null(records) || length(records) == 0 || is.null(items) || length(items) == 0) {
         status_vec[key]  <- "Not Found"
         code_vec[key]    <- "Not Found"
@@ -939,28 +1202,28 @@ enrich_hathitrust <- function(data,
         url_all_vec[key] <- NA_character_
         next
       }
- 
+
       rights_strings <- vapply(items, function(it) {
         if (is.null(it$usRightsString)) NA_character_ else it$usRightsString
       }, character(1))
       rights_codes <- vapply(items, function(it) {
         if (is.null(it$rightsCode)) NA_character_ else it$rightsCode
       }, character(1))
- 
+
       # A title can (rarely) have multiple scanned items with different
       # rights statuses. unique() preserves first-occurrence order from the
       # API's `items` array, which isn't guaranteed stable between separate
       # calls -- sort so the same title always renders identically.
       unique_codes  <- sort(unique(stats::na.omit(rights_codes)))
       unique_status <- sort(unique(stats::na.omit(rights_strings)))
- 
+
       status_vec[key] <- if (length(unique_status) > 0) paste(unique_status, collapse = "; ") else NA_character_
       code_vec[key]   <- if (length(unique_codes) > 0) paste(unique_codes, collapse = "; ") else NA_character_
- 
+
       descriptions <- HATHITRUST_RIGHTS_CODES[unique_codes]
       descriptions[is.na(descriptions)] <- paste0("Unknown code: ", unique_codes[is.na(descriptions)])
       desc_vec[key] <- if (length(descriptions) > 0) paste(descriptions, collapse = "; ") else NA_character_
- 
+
       # A title can also match multiple separate catalog records, each with
       # its own recordURL -- same ordering caveat as above, so sort before
       # picking a deterministic "primary" URL. url_vec keeps one clickable
@@ -969,11 +1232,11 @@ enrich_hathitrust <- function(data,
         if (is.null(rec$recordURL)) NA_character_ else rec$recordURL
       }, character(1))
       unique_urls <- sort(unique(stats::na.omit(record_urls)))
- 
+
       url_vec[key]     <- if (length(unique_urls) > 0) unique_urls[1] else NA_character_
       url_all_vec[key] <- if (length(unique_urls) > 0) paste(unique_urls, collapse = "; ") else NA_character_
     }
- 
+
     chunk_keys <- pending$key[idx]
     chunk_results <- data.frame(
       identifier  = chunk_keys,
@@ -986,18 +1249,18 @@ enrich_hathitrust <- function(data,
       stringsAsFactors = FALSE
     )
     running_results <- rbind(running_results, chunk_results)
- 
+
     if (!is.null(checkpoint_path)) {
       tmp_path <- paste0(checkpoint_path, ".tmp")
       utils::write.csv(running_results, tmp_path, row.names = FALSE)
       file.rename(tmp_path, checkpoint_path)
     }
- 
+
     if (c_i < length(chunks)) Sys.sleep(delay_seconds)
   }
- 
+
   all_results <- running_results
- 
+
   # Build lookup and join back, keyed on the same combined "type:value"
   # key that was actually queried against the API 
   lookup <- tibble(
@@ -1009,25 +1272,25 @@ enrich_hathitrust <- function(data,
     !!new_col_url_all   := all_results$url_all,
     !!new_col_manual_url := all_results$manual_url
   )
- 
+
   data$.id_key <- combined_key
   data <- left_join(data, lookup, by = ".id_key")
   data$.id_key <- NULL
- 
+
   # Records which identifier type actually got used per row -- most useful
   # in id_cols (priority-fallback) mode, where it can vary row to row, but
   # populated in single-column mode too for consistency.
   data[[new_col_id_type]]  <- id_type_per_row
   data[[new_col_id_value]] <- clean_ids
- 
+
   stopifnot(
     "Row count changed after HathiTrust enrichment — this should never happen." =
       nrow(data) == original_n
   )
- 
+
   matched <- sum(!is.na(data[[new_col_url]]))
   message("Done. ", matched, " of ", original_n, " rows matched a HathiTrust record.")
- 
+
   data
 }
 }
