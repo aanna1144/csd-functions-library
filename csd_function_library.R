@@ -638,13 +638,19 @@ enrich_vernacular_title <- function(data,
 # ║                                  checkpoint_path = "ht_checkpoint.csv")    ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 
-# ── Identifier normalization ─────────────────────────────────────────────────
+
+#  Identifier normalization 
+# Real library data is messy in predictable ways. Without this, identifiers
+# that are perfectly valid but non-canonically formatted (hyphenated ISBNs,
+# OCLC numbers with library-system prefixes, ISSNs that lost a leading zero
+# somewhere upstream) silently come back "Not Found" -- which looks like a
+# missing HathiTrust record, but is actually a request we built wrong.
 # Full rightsCode -> description mapping, sourced directly from HathiTrust's
 # Rights Database documentation "Attributes" table:
 # https://www.hathitrust.org/the-collection/preservation/rights-database/
 # Used to give enrich_hathitrust() callers the actual rights description,
-# - last checked/updated per that page's current content as of this writing.
-
+# not just a collapsed Yes/No -- last checked/updated per that page's
+# current content as of this writing.
 HATHITRUST_RIGHTS_CODES <- c(
   "pd"              = "Public domain",
   "ic"              = "In-copyright",
@@ -680,7 +686,7 @@ normalize_identifier <- function(x, id_type) {
 
   if (id_type == "oclc") {
     # Strip common MARC-style OCLC prefixes: (OCoLC)12345, ocm12345,
-    # ocn12345, on12345 - then anything else non-digit.
+    # ocn12345, on12345 -- then anything else non-digit.
     x <- gsub("^\\(OCoLC\\)", "", x, ignore.case = TRUE)
     x <- gsub("^(ocm|ocn|on)", "", x, ignore.case = TRUE)
     x <- gsub("[^0-9]", "", x)
@@ -701,40 +707,119 @@ normalize_identifier <- function(x, id_type) {
   x[x == ""] <- NA_character_
   x
 }
+
 enrich_hathitrust <- function(data,
-                              id_col,
+                              id_col           = NULL,
                               id_type          = c("oclc", "isbn", "issn", "lccn"),
+                              id_cols          = NULL,
                               new_col_status   = "HathiTrust Rights Status",
                               new_col_code     = "HathiTrust Rights Code",
                               new_col_desc     = "HathiTrust Rights Description",
                               new_col_url      = "HathiTrust URL",
                               new_col_url_all  = "HathiTrust URL (All Records)",
-                              chunk_size   = 20,
-                              delay_seconds = 0.3,
-                              checkpoint_path = NULL) {
-
-  id_type <- match.arg(id_type)
-
+                              new_col_manual_url = "HathiTrust Manual Check URL",
+                              new_col_id_type  = "HathiTrust ID Type Used",
+                              new_col_id_value = "HathiTrust ID Value Used",
+                              chunk_size       = 20,
+                              delay_seconds    = 0.3,
+                              checkpoint_path  = NULL) {
+ 
+  valid_types <- c("oclc", "isbn", "issn", "lccn")
+ 
+  #  Input validation: exactly one of id_col or id_cols must be given 
+  if (is.null(id_col) && is.null(id_cols)) {
+    stop("Must supply either id_col (a single identifier column) or id_cols ",
+         "(a named vector of columns in priority order, e.g. c(oclc = ",
+         "\"OCLC No.\", issn = \"ISSN\", isbn = \"ISBN\")).", call. = FALSE)
+  }
+  if (!is.null(id_col) && !is.null(id_cols)) {
+    stop("Supply either id_col or id_cols, not both.", call. = FALSE)
+  }
+ 
+  if (!is.null(id_cols)) {
+    if (is.null(names(id_cols)) || any(names(id_cols) == "")) {
+      stop("id_cols must be a named vector -- names give the id_type per ",
+           "column, in priority order, e.g. c(oclc = \"OCLC No.\", issn = ",
+           "\"ISSN\", isbn = \"ISBN\").", call. = FALSE)
+    }
+    bad_types <- setdiff(names(id_cols), valid_types)
+    if (length(bad_types) > 0) {
+      stop("id_cols has invalid id_type name(s): ", paste(bad_types, collapse = ", "),
+           ". Valid types: ", paste(valid_types, collapse = ", "), call. = FALSE)
+    }
+    missing_cols <- setdiff(unname(id_cols), names(data))
+    if (length(missing_cols) > 0) {
+      stop("id_cols references column(s) not found in data: ",
+           paste(missing_cols, collapse = ", "), call. = FALSE)
+    }
+  } else {
+    id_type <- match.arg(id_type)
+    if (!id_col %in% names(data)) {
+      stop(sprintf("Column '%s' not found in data frame.", id_col), call. = FALSE)
+    }
+  }
+ 
   if (chunk_size > 20) {
     warning("chunk_size > 20 requested; HathiTrust's documented cap is 20. Clamping to 20.",
             call. = FALSE)
     chunk_size <- 20
   }
-
+ 
   original_n <- nrow(data)
-  id_values  <- data[[id_col]]
-
-  clean_ids  <- normalize_identifier(trimws(as.character(id_values)), id_type)
-  unique_ids <- unique(na.omit(clean_ids))
-  n_unique   <- length(unique_ids)
-
-  message("Looking up HathiTrust rights status for ", n_unique, " unique ", toupper(id_type),
-          " values (chunk_size=", chunk_size, ", delay_seconds=", delay_seconds, ")...")
-
-  #  Checkpoint support: for very large or long-running jobs, skip
-  #  identifiers already resolved in a previous (possibly interrupted) run,
-  #  and persist new results as we go so a crash mid-run doesn't lose
-  #  everything already looked up. 
+ 
+  #  Resolve, per row, which identifier to actually use. 
+  # Single-column mode (id_col/id_type): every row uses the same type.
+  # Multi-column mode (id_cols): tries each column in the order given,
+  # taking the first one that isn't blank/NA for that row -- e.g. OCLC first,
+  # falling back to ISSN, then ISBN, if OCLC is missing for that particular row.
+  if (!is.null(id_cols)) {
+    chosen_type <- rep(NA_character_, original_n)
+    chosen_raw  <- rep(NA_character_, original_n)
+ 
+    for (t in names(id_cols)) {
+      col <- id_cols[[t]]
+      raw_vals <- trimws(as.character(data[[col]]))
+      raw_vals[raw_vals %in% c("", "NA")] <- NA_character_
+      needs_fill <- is.na(chosen_type) & !is.na(raw_vals)
+      chosen_type[needs_fill] <- t
+      chosen_raw[needs_fill]  <- raw_vals[needs_fill]
+    }
+ 
+    clean_ids <- rep(NA_character_, original_n)
+    for (t in unique(stats::na.omit(chosen_type))) {
+      rows_t <- which(chosen_type == t)
+      clean_ids[rows_t] <- normalize_identifier(chosen_raw[rows_t], t)
+    }
+    id_type_per_row <- chosen_type
+    id_type_per_row[is.na(clean_ids)] <- NA_character_
+ 
+    message("Priority order for identifiers: ", paste(names(id_cols), collapse = " > "))
+  } else {
+    id_values <- data[[id_col]]
+    clean_ids <- normalize_identifier(trimws(as.character(id_values)), id_type)
+    id_type_per_row <- rep(id_type, original_n)
+    id_type_per_row[is.na(clean_ids)] <- NA_character_
+  }
+ 
+  # Combined key ("type:value") -- used for dedup/chunking/checkpointing so
+  # an identifier is never ambiguous about which id_type it was queried as
+  # (matters once more than one type can appear in the same run).
+  combined_key <- ifelse(is.na(clean_ids) | is.na(id_type_per_row), NA_character_,
+                          paste0(id_type_per_row, ":", clean_ids))
+ 
+  key_df <- data.frame(key = combined_key, type = id_type_per_row, value = clean_ids,
+                        stringsAsFactors = FALSE)
+  key_df <- key_df[!is.na(key_df$key), ]
+  unique_keys_df <- key_df[!duplicated(key_df$key), ]
+  n_unique <- nrow(unique_keys_df)
+ 
+  message("Looking up HathiTrust rights status for ", n_unique, " unique identifier(s) ",
+          "(chunk_size=", chunk_size, ", delay_seconds=", delay_seconds, ")...")
+ 
+  # Checkpoint support: for very large or long-running jobs, skip
+  # identifiers already resolved in a previous (possibly interrupted) run,
+  # and continue to give new results as we go so a crash mid-run doesn't lose
+  # everything already looked up. 
   checkpoint_data <- NULL
   if (!is.null(checkpoint_path) && file.exists(checkpoint_path)) {
     checkpoint_data <- tryCatch(
@@ -753,25 +838,33 @@ enrich_hathitrust <- function(data,
     message("Resuming from checkpoint: ", nrow(checkpoint_data),
             " identifiers already resolved in ", checkpoint_path)
   }
-
+ 
   already_done <- if (!is.null(checkpoint_data)) checkpoint_data$identifier else character(0)
-  ids_to_query <- setdiff(unique_ids, already_done)
-
-  if (length(ids_to_query) < n_unique) {
-    message(n_unique - length(ids_to_query), " of ", n_unique,
+  keys_to_query <- setdiff(unique_keys_df$key, already_done)
+  pending <- unique_keys_df[match(keys_to_query, unique_keys_df$key), ]
+ 
+  if (nrow(pending) < n_unique) {
+    message(n_unique - nrow(pending), " of ", n_unique,
             " identifiers already in checkpoint; querying the remaining ",
-            length(ids_to_query), ".")
+            nrow(pending), ".")
   }
-
-  chunks <- split(ids_to_query, ceiling(seq_along(ids_to_query) / chunk_size))
-  if (length(ids_to_query) == 0) chunks <- list()
-
-  #  Build one request per chunk (each covers up to chunk_size identifiers
-  #  via HathiTrust's documented multi-id search spec) 
-  requests <- lapply(chunks, function(chunk) {
+ 
+  chunks <- if (nrow(pending) > 0) {
+    split(seq_len(nrow(pending)), ceiling(seq_len(nrow(pending)) / chunk_size))
+  } else {
+    list()
+  }
+ 
+  # Build one request per chunk. HathiTrust's multi-id search spec allows
+  # mixing identifier types within a single request (e.g. an OCLC number
+  # and an ISSN together) -- each entry carries its own type, so a
+  # priority-fallback batch doesn't need separate requests per type. 
+  requests <- lapply(chunks, function(idx) {
     spec <- paste(
-      vapply(seq_along(chunk), function(i) {
-        paste0("id:", i, ";", id_type, ":", utils::URLencode(chunk[i], reserved = TRUE))
+      vapply(seq_along(idx), function(i) {
+        row <- idx[i]
+        paste0("id:", i, ";", pending$type[row], ":",
+               utils::URLencode(pending$value[row], reserved = TRUE))
       }, character(1)),
       collapse = "|"
     )
@@ -779,152 +872,162 @@ enrich_hathitrust <- function(data,
       req_user_agent("csd-functions-library (UCSB Library Collection Strategies)") |>
       req_retry(max_tries = 3, backoff = ~2^.x)
   })
-
-  # Fetch, parse, and checkpoint one chunk at a time.
-  # Processing and saving each chunk fully before moving to the next means at most 
-  # one chunk's worth of work (up to chunk_size identifiers) is ever at risk.
-  # NOTE on sizing: status_vec/code_vec/desc_vec/url_vec/url_all_vec below
-  # only hold results for `ids_to_query` - the identifiers being fetched
-  # THIS run, not every identifier in the original data. Anything already
-  # resolved in a prior run was excluded from ids_to_query earlier (see
-  # "already_done"/"setdiff" above); it's carried forward via
-  # `running_results` (seeded from the checkpoint)
-  n_query <- length(ids_to_query)
-  status_vec  <- character(n_query)  # raw usRightsString ("Full view" / "Limited (search-only)")
-  code_vec    <- character(n_query)  # raw rightsCode(s), semicolon-joined if more than one
-  desc_vec    <- character(n_query)  # rightsCode(s) mapped to their full description
-  url_vec     <- character(n_query)  # single deterministic "primary" URL (alphabetically first)
-  url_all_vec <- character(n_query)  # every distinct record URL found, semicolon-joined
-  names(status_vec) <- names(code_vec) <- names(desc_vec) <-
-    names(url_vec) <- names(url_all_vec) <- ids_to_query
-
+ 
+  # ── Fetch, parse, and checkpoint ONE CHUNK AT A TIME -- an interruption
+  #    risks losing at most one chunk's worth of identifiers, not the whole
+  #    run. Results are keyed on the combined "type:value" key. ────────────
+  status_vec     <- character(nrow(pending))
+  code_vec       <- character(nrow(pending))
+  desc_vec       <- character(nrow(pending))
+  url_vec        <- character(nrow(pending))
+  url_all_vec    <- character(nrow(pending))
+  manual_url_vec <- character(nrow(pending))
+  names(status_vec) <- names(code_vec) <- names(desc_vec) <- names(url_vec) <-
+    names(url_all_vec) <- names(manual_url_vec) <- pending$key
+ 
   running_results <- if (!is.null(checkpoint_data)) {
-    checkpoint_data[, c("identifier", "status", "code", "desc", "url", "url_all")]
+    checkpoint_data[, c("identifier", "status", "code", "desc", "url", "url_all", "manual_url")]
   } else {
     data.frame(identifier = character(0), status = character(0), code = character(0),
                desc = character(0), url = character(0), url_all = character(0),
-               stringsAsFactors = FALSE)
+               manual_url = character(0), stringsAsFactors = FALSE)
   }
-
+ 
   for (c_i in seq_along(chunks)) {
-    chunk <- chunks[[c_i]]
-
+    idx <- chunks[[c_i]]
+ 
     resp   <- tryCatch(req_perform(requests[[c_i]]), error = function(e) NULL)
     parsed <- if (is.null(resp)) NULL else tryCatch(resp_body_json(resp), error = function(e) NULL)
-
-    for (i in seq_along(chunk)) {
-      ident <- chunk[i]
-
+ 
+    for (i in seq_along(idx)) {
+      row <- idx[i]
+      key <- pending$key[row]
+ 
+      # Built for every identifier regardless of outcome -- most useful on
+      # "Not Found"/"Error" rows, so a librarian can manually search
+      # HathiTrust's broader catalog (not just an exact-identifier match)
+      # in case the title exists under a different identifier than the one
+      # queried -- exactly the pattern found during validation (e.g. a
+      # record attached to a different OCLC number than the source data).
+      # NOTE: this search URL format (VuFind-style) has not been confirmed
+      # live against HathiTrust's catalog -- test one manually before
+      # relying on it.
+      manual_url_vec[key] <- paste0(
+        "https://catalog.hathitrust.org/Search/Home?lookfor=",
+        utils::URLencode(pending$value[row], reserved = TRUE),
+        "&type=all"
+      )
+ 
       if (is.null(parsed)) {
-        status_vec[ident]  <- "Error"
-        code_vec[ident]    <- "Error"
-        desc_vec[ident]    <- "Error"
-        url_vec[ident]     <- NA_character_
-        url_all_vec[ident] <- NA_character_
+        status_vec[key]  <- "Error"
+        code_vec[key]    <- "Error"
+        desc_vec[key]    <- "Error -- the request failed after retries. This is not a real answer about the collection; try again, and check the manual search link if it keeps failing."
+        url_vec[key]     <- NA_character_
+        url_all_vec[key] <- NA_character_
         next
       }
-
+ 
       entry   <- parsed[[as.character(i)]]
       records <- entry$records
       items   <- entry$items
-
+ 
       if (is.null(records) || length(records) == 0 || is.null(items) || length(items) == 0) {
-        status_vec[ident]  <- "Not Found"
-        code_vec[ident]    <- "Not Found"
-        desc_vec[ident]    <- "Not Found"
-        url_vec[ident]     <- NA_character_
-        url_all_vec[ident] <- NA_character_
+        status_vec[key]  <- "Not Found"
+        code_vec[key]    <- "Not Found"
+        desc_vec[key]    <- "Not Found -- no HathiTrust record matched this specific identifier. This does not necessarily mean HathiTrust lacks the title -- it may be catalogued under a different identifier (see the manual search link)."
+        url_vec[key]     <- NA_character_
+        url_all_vec[key] <- NA_character_
         next
       }
-
+ 
       rights_strings <- vapply(items, function(it) {
         if (is.null(it$usRightsString)) NA_character_ else it$usRightsString
       }, character(1))
       rights_codes <- vapply(items, function(it) {
         if (is.null(it$rightsCode)) NA_character_ else it$rightsCode
       }, character(1))
-
+ 
       # A title can (rarely) have multiple scanned items with different
-      # rights statuses. Report every distinct code/status found, rather
-      # than silently collapsing to one
-      # unique() preserves first-occurrence order from the API's `items`
-      # array, which isn't guaranteed stable between separate calls. Sort so
-      # a title with multiple rights statuses always renders the same way
-      # regardless of what order HathiTrust happened to list its items in.
+      # rights statuses. unique() preserves first-occurrence order from the
+      # API's `items` array, which isn't guaranteed stable between separate
+      # calls -- sort so the same title always renders identically.
       unique_codes  <- sort(unique(stats::na.omit(rights_codes)))
       unique_status <- sort(unique(stats::na.omit(rights_strings)))
-
-      status_vec[ident] <- if (length(unique_status) > 0) paste(unique_status, collapse = "; ") else NA_character_
-      code_vec[ident]   <- if (length(unique_codes) > 0) paste(unique_codes, collapse = "; ") else NA_character_
-
+ 
+      status_vec[key] <- if (length(unique_status) > 0) paste(unique_status, collapse = "; ") else NA_character_
+      code_vec[key]   <- if (length(unique_codes) > 0) paste(unique_codes, collapse = "; ") else NA_character_
+ 
       descriptions <- HATHITRUST_RIGHTS_CODES[unique_codes]
       descriptions[is.na(descriptions)] <- paste0("Unknown code: ", unique_codes[is.na(descriptions)])
-      desc_vec[ident] <- if (length(descriptions) > 0) paste(descriptions, collapse = "; ") else NA_character_
-
-      # A title can also have multiple catalog records, each with its own
-      # recordURL. Same pattern as rights_codes/rights_strings above:
-      # collect every URL, drop NA, dedupe, then sort so the pick is
-      # deterministic instead of "whichever the API happened to list
-      # first" (which isn't guaranteed stable between separate calls).
-      # url_vec keeps a single primary link (for anything that needs one
-      # clickable URL, e.g. catalog embedding); url_all_vec keeps all of
-      # them for anyone who wants the full picture.
+      desc_vec[key] <- if (length(descriptions) > 0) paste(descriptions, collapse = "; ") else NA_character_
+ 
+      # A title can also match multiple separate catalog records, each with
+      # its own recordURL -- same ordering caveat as above, so sort before
+      # picking a deterministic "primary" URL. url_vec keeps one clickable
+      # link; url_all_vec keeps every record found.
       record_urls <- vapply(records, function(rec) {
         if (is.null(rec$recordURL)) NA_character_ else rec$recordURL
       }, character(1))
       unique_urls <- sort(unique(stats::na.omit(record_urls)))
-
-      url_vec[ident]     <- if (length(unique_urls) > 0) unique_urls[1] else NA_character_
-      url_all_vec[ident] <- if (length(unique_urls) > 0) paste(unique_urls, collapse = "; ") else NA_character_
+ 
+      url_vec[key]     <- if (length(unique_urls) > 0) unique_urls[1] else NA_character_
+      url_all_vec[key] <- if (length(unique_urls) > 0) paste(unique_urls, collapse = "; ") else NA_character_
     }
-
-    # Pushes THIS chunk's results immediately, before moving on
+ 
+    chunk_keys <- pending$key[idx]
     chunk_results <- data.frame(
-      identifier = chunk,
-      status  = unname(status_vec[chunk]),
-      code    = unname(code_vec[chunk]),
-      desc    = unname(desc_vec[chunk]),
-      url     = unname(url_vec[chunk]),
-      url_all = unname(url_all_vec[chunk]),
+      identifier  = chunk_keys,
+      status      = unname(status_vec[chunk_keys]),
+      code        = unname(code_vec[chunk_keys]),
+      desc        = unname(desc_vec[chunk_keys]),
+      url         = unname(url_vec[chunk_keys]),
+      url_all     = unname(url_all_vec[chunk_keys]),
+      manual_url  = unname(manual_url_vec[chunk_keys]),
       stringsAsFactors = FALSE
     )
     running_results <- rbind(running_results, chunk_results)
-
+ 
     if (!is.null(checkpoint_path)) {
-      # Write to a temp file, then rename over the real path.
-      # Guards against a crash happening mid-write 
       tmp_path <- paste0(checkpoint_path, ".tmp")
       utils::write.csv(running_results, tmp_path, row.names = FALSE)
       file.rename(tmp_path, checkpoint_path)
     }
-
+ 
     if (c_i < length(chunks)) Sys.sleep(delay_seconds)
   }
-
+ 
   all_results <- running_results
-
-  # Build lookup and join back, keyed on the same normalized identifier
-  # that was queried against the API 
+ 
+  # Build lookup and join back, keyed on the same combined "type:value"
+  # key that was actually queried against the API 
   lookup <- tibble(
-    .id_key           = all_results$identifier,
-    !!new_col_status  := all_results$status,
-    !!new_col_code    := all_results$code,
-    !!new_col_desc    := all_results$desc,
-    !!new_col_url     := all_results$url,
-    !!new_col_url_all := all_results$url_all
+    .id_key             = all_results$identifier,
+    !!new_col_status    := all_results$status,
+    !!new_col_code      := all_results$code,
+    !!new_col_desc      := all_results$desc,
+    !!new_col_url       := all_results$url,
+    !!new_col_url_all   := all_results$url_all,
+    !!new_col_manual_url := all_results$manual_url
   )
-
-  data$.id_key <- clean_ids
+ 
+  data$.id_key <- combined_key
   data <- left_join(data, lookup, by = ".id_key")
   data$.id_key <- NULL
-
+ 
+  # Records which identifier type actually got used per row -- most useful
+  # in id_cols (priority-fallback) mode, where it can vary row to row, but
+  # populated in single-column mode too for consistency.
+  data[[new_col_id_type]]  <- id_type_per_row
+  data[[new_col_id_value]] <- clean_ids
+ 
   stopifnot(
     "Row count changed after HathiTrust enrichment — this should never happen." =
       nrow(data) == original_n
   )
-
+ 
   matched <- sum(!is.na(data[[new_col_url]]))
   message("Done. ", matched, " of ", original_n, " rows matched a HathiTrust record.")
-
+ 
   data
+}
 }
