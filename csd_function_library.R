@@ -592,6 +592,7 @@ enrich_vernacular_title <- function(data,
   message("Done. ", matched, " of ", original_n, " rows had a vernacular title.")
 
   data
+}
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  FUNCTION 7: HATHITRUST API — RIGHTS STATUS & CATALOG URL                  ║
 # ║                                                                            ║
@@ -700,7 +701,6 @@ normalize_identifier <- function(x, id_type) {
   x[x == ""] <- NA_character_
   x
 }
-
 enrich_hathitrust <- function(data,
                               id_col,
                               id_type          = c("oclc", "isbn", "issn", "lccn"),
@@ -708,6 +708,7 @@ enrich_hathitrust <- function(data,
                               new_col_code     = "HathiTrust Rights Code",
                               new_col_desc     = "HathiTrust Rights Description",
                               new_col_url      = "HathiTrust URL",
+                              new_col_url_all  = "HathiTrust URL (All Records)",
                               chunk_size   = 20,
                               delay_seconds = 0.3,
                               checkpoint_path = NULL) {
@@ -782,24 +783,27 @@ enrich_hathitrust <- function(data,
   # Fetch, parse, and checkpoint one chunk at a time.
   # Processing and saving each chunk fully before moving to the next means at most 
   # one chunk's worth of work (up to chunk_size identifiers) is ever at risk.
-  # NOTE on sizing: status_vec/code_vec/desc_vec/url_vec below only hold
-  # results for `ids_to_query` - the identifiers being fetched THIS run,
-  # not every identifier in the original data. Anything already resolved
-  # in a prior run was excluded from ids_to_query earlier (see
+  # NOTE on sizing: status_vec/code_vec/desc_vec/url_vec/url_all_vec below
+  # only hold results for `ids_to_query` - the identifiers being fetched
+  # THIS run, not every identifier in the original data. Anything already
+  # resolved in a prior run was excluded from ids_to_query earlier (see
   # "already_done"/"setdiff" above); it's carried forward via
   # `running_results` (seeded from the checkpoint)
   n_query <- length(ids_to_query)
-  status_vec <- character(n_query)  # raw usRightsString ("Full view" / "Limited (search-only)")
-  code_vec   <- character(n_query)  # raw rightsCode(s), semicolon-joined if more than one
-  desc_vec   <- character(n_query)  # rightsCode(s) mapped to their full description
-  url_vec    <- character(n_query)
-  names(status_vec) <- names(code_vec) <- names(desc_vec) <- names(url_vec) <- ids_to_query
+  status_vec  <- character(n_query)  # raw usRightsString ("Full view" / "Limited (search-only)")
+  code_vec    <- character(n_query)  # raw rightsCode(s), semicolon-joined if more than one
+  desc_vec    <- character(n_query)  # rightsCode(s) mapped to their full description
+  url_vec     <- character(n_query)  # single deterministic "primary" URL (alphabetically first)
+  url_all_vec <- character(n_query)  # every distinct record URL found, semicolon-joined
+  names(status_vec) <- names(code_vec) <- names(desc_vec) <-
+    names(url_vec) <- names(url_all_vec) <- ids_to_query
 
   running_results <- if (!is.null(checkpoint_data)) {
-    checkpoint_data[, c("identifier", "status", "code", "desc", "url")]
+    checkpoint_data[, c("identifier", "status", "code", "desc", "url", "url_all")]
   } else {
     data.frame(identifier = character(0), status = character(0), code = character(0),
-               desc = character(0), url = character(0), stringsAsFactors = FALSE)
+               desc = character(0), url = character(0), url_all = character(0),
+               stringsAsFactors = FALSE)
   }
 
   for (c_i in seq_along(chunks)) {
@@ -812,10 +816,11 @@ enrich_hathitrust <- function(data,
       ident <- chunk[i]
 
       if (is.null(parsed)) {
-        status_vec[ident] <- "Error"
-        code_vec[ident]   <- "Error"
-        desc_vec[ident]   <- "Error"
-        url_vec[ident]    <- NA_character_
+        status_vec[ident]  <- "Error"
+        code_vec[ident]    <- "Error"
+        desc_vec[ident]    <- "Error"
+        url_vec[ident]     <- NA_character_
+        url_all_vec[ident] <- NA_character_
         next
       }
 
@@ -824,10 +829,11 @@ enrich_hathitrust <- function(data,
       items   <- entry$items
 
       if (is.null(records) || length(records) == 0 || is.null(items) || length(items) == 0) {
-        status_vec[ident] <- "Not Found"
-        code_vec[ident]   <- "Not Found"
-        desc_vec[ident]   <- "Not Found"
-        url_vec[ident]    <- NA_character_
+        status_vec[ident]  <- "Not Found"
+        code_vec[ident]    <- "Not Found"
+        desc_vec[ident]    <- "Not Found"
+        url_vec[ident]     <- NA_character_
+        url_all_vec[ident] <- NA_character_
         next
       }
 
@@ -845,7 +851,7 @@ enrich_hathitrust <- function(data,
       # array, which isn't guaranteed stable between separate calls. Sort so
       # a title with multiple rights statuses always renders the same way
       # regardless of what order HathiTrust happened to list its items in.
-      unique_codes <- sort(unique(stats::na.omit(rights_codes)))
+      unique_codes  <- sort(unique(stats::na.omit(rights_codes)))
       unique_status <- sort(unique(stats::na.omit(rights_strings)))
 
       status_vec[ident] <- if (length(unique_status) > 0) paste(unique_status, collapse = "; ") else NA_character_
@@ -855,17 +861,31 @@ enrich_hathitrust <- function(data,
       descriptions[is.na(descriptions)] <- paste0("Unknown code: ", unique_codes[is.na(descriptions)])
       desc_vec[ident] <- if (length(descriptions) > 0) paste(descriptions, collapse = "; ") else NA_character_
 
-      first_record    <- records[[1]]
-      url_vec[ident]  <- if (is.null(first_record$recordURL)) NA_character_ else first_record$recordURL
+      # A title can also have multiple catalog records, each with its own
+      # recordURL. Same pattern as rights_codes/rights_strings above:
+      # collect every URL, drop NA, dedupe, then sort so the pick is
+      # deterministic instead of "whichever the API happened to list
+      # first" (which isn't guaranteed stable between separate calls).
+      # url_vec keeps a single primary link (for anything that needs one
+      # clickable URL, e.g. catalog embedding); url_all_vec keeps all of
+      # them for anyone who wants the full picture.
+      record_urls <- vapply(records, function(rec) {
+        if (is.null(rec$recordURL)) NA_character_ else rec$recordURL
+      }, character(1))
+      unique_urls <- sort(unique(stats::na.omit(record_urls)))
+
+      url_vec[ident]     <- if (length(unique_urls) > 0) unique_urls[1] else NA_character_
+      url_all_vec[ident] <- if (length(unique_urls) > 0) paste(unique_urls, collapse = "; ") else NA_character_
     }
 
     # Pushes THIS chunk's results immediately, before moving on
     chunk_results <- data.frame(
       identifier = chunk,
-      status = unname(status_vec[chunk]),
-      code   = unname(code_vec[chunk]),
-      desc   = unname(desc_vec[chunk]),
-      url    = unname(url_vec[chunk]),
+      status  = unname(status_vec[chunk]),
+      code    = unname(code_vec[chunk]),
+      desc    = unname(desc_vec[chunk]),
+      url     = unname(url_vec[chunk]),
+      url_all = unname(url_all_vec[chunk]),
       stringsAsFactors = FALSE
     )
     running_results <- rbind(running_results, chunk_results)
@@ -886,11 +906,12 @@ enrich_hathitrust <- function(data,
   # Build lookup and join back, keyed on the same normalized identifier
   # that was queried against the API 
   lookup <- tibble(
-    .id_key          = all_results$identifier,
-    !!new_col_status := all_results$status,
-    !!new_col_code   := all_results$code,
-    !!new_col_desc   := all_results$desc,
-    !!new_col_url    := all_results$url
+    .id_key           = all_results$identifier,
+    !!new_col_status  := all_results$status,
+    !!new_col_code    := all_results$code,
+    !!new_col_desc    := all_results$desc,
+    !!new_col_url     := all_results$url,
+    !!new_col_url_all := all_results$url_all
   )
 
   data$.id_key <- clean_ids
